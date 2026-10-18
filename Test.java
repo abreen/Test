@@ -23,6 +23,13 @@ public class Test {
     }
   }
 
+  // Thrown after a failed assertion to stop the rest of the case.
+  private static class Abort extends RuntimeException {
+    Abort() {
+      super(null, null, false, false);
+    }
+  }
+
   private static final ThreadLocal<CaseRun> current = new ThreadLocal<>();
 
   private static ExecutorService pool;
@@ -63,13 +70,19 @@ public class Test {
     String className = frames[2].getClassName();
     String assertion = String.format("%s:%d", frames[2].getFileName(), frames[2].getLineNumber());
 
+    boolean ok = false;
     try {
-      if (!function.call()) {
+      ok = function.call();
+      if (!ok) {
         run.problems.add("failed assertion: " + assertion);
       }
     } catch (Exception | StackOverflowError e) {
       run.problems.add("error: " + assertion + " (" + describe(e, className) + ")");
       run.threw = true;
+    }
+
+    if (!ok) {
+      throw new Abort();
     }
   }
 
@@ -79,15 +92,21 @@ public class Test {
     StackTraceElement[] frames = Thread.currentThread().getStackTrace();
     String assertion = String.format("%s:%d", frames[2].getFileName(), frames[2].getLineNumber());
 
+    boolean ok = false;
     try {
       function.run();
       run.problems.add("failed assertion: " + assertion + " (expected " + expected.getSimpleName()
         + ", nothing thrown)");
     } catch (Throwable t) {
-      if (!expected.isInstance(t)) {
+      ok = expected.isInstance(t);
+      if (!ok) {
         run.problems.add("failed assertion: " + assertion + " (expected " + expected.getSimpleName()
           + ", got " + t.getClass().getSimpleName() + ")");
       }
+    }
+
+    if (!ok) {
+      throw new Abort();
     }
   }
 
@@ -144,8 +163,10 @@ public class Test {
           }
           method.invoke(instance);
         } catch (InvocationTargetException e) {
-          run.problems.add("error: " + run.name + " (" + describe(e.getCause(), cases.getName()) + ")");
-          run.threw = true;
+          if (!(e.getCause() instanceof Abort)) {
+            run.problems.add("error: " + run.name + " (" + describe(e.getCause(), cases.getName()) + ")");
+            run.threw = true;
+          }
         } catch (Exception | StackOverflowError e) {
           run.problems.add("error: " + run.name + " (" + describe(e, cases.getName()) + ")");
           run.threw = true;
