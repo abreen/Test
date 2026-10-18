@@ -1,16 +1,33 @@
+import java.lang.annotation.*;
+import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.*;
 import static java.util.concurrent.Executors.newFixedThreadPool;
 
 public class Test {
-  private static ExecutorService pool;
-  private static ExecutorCompletionService<Result> service;
-  private static String lastFileName;
-  private static int numAssertions;
-  private static List<Result> results;
-  private static List<String> unfinished;
+  private static final int TIMEOUT_SECONDS = 5;
 
-  record Result(String assertion, boolean testPassed, String error) {}
+  @Retention(RetentionPolicy.RUNTIME)
+  @Target(ElementType.METHOD)
+  public @interface Case {}
+
+  private static class CaseRun {
+    final String name;
+    final List<String> problems = new ArrayList<>();
+    volatile long start;
+    volatile boolean finished;
+    volatile boolean threw;
+
+    CaseRun(String name) {
+      this.name = name;
+    }
+  }
+
+  private static final ThreadLocal<CaseRun> current = new ThreadLocal<>();
+
+  private static ExecutorService pool;
+  private static ExecutorCompletionService<CaseRun> service;
+  private static List<CaseRun> runs;
 
   public Test() {
     init();
@@ -23,76 +40,128 @@ public class Test {
       return t;
     });
     service = new ExecutorCompletionService<>(pool);
-    lastFileName = null;
-    numAssertions = 0;
-    results = new ArrayList<>(200);
-    unfinished = new ArrayList<>();
+    runs = new ArrayList<>();
   }
 
   public static void assertTrue(Callable<Boolean> function) {
-    if (pool == null) {
-      init();
+    CaseRun run = current.get();
+    if (run == null) {
+      throw new IllegalStateException("assertTrue must be called from a @Test.Case method");
     }
 
     StackTraceElement[] frames = Thread.currentThread().getStackTrace();
-    String fileName = frames[2].getFileName();
+    String className = frames[2].getClassName();
+    String assertion = String.format("%s:%d", frames[2].getFileName(), frames[2].getLineNumber());
 
-    if (lastFileName != null && !fileName.equals(lastFileName)) {
-      throw new IllegalStateException("only one file may be tested at once");
-    } else {
-      lastFileName = fileName;
-    }
-
-    int lineNumber = frames[2].getLineNumber();
-
-    String assertion = String.format("%s:%d", fileName, lineNumber);
-    unfinished.add(assertion);
-
-    Callable<Result> task = () -> {
-      boolean testPassed;
-      String error = null;
-      try {
-        testPassed = function.call();
-      } catch (Exception | StackOverflowError e) {
-        testPassed = false;
-        error = describe(e, fileName);
+    try {
+      if (!function.call()) {
+        run.problems.add("failed: " + assertion);
       }
-      return new Result(assertion, testPassed, error);
-    };
-
-    service.submit(task);
-    numAssertions++;
+    } catch (Exception | StackOverflowError e) {
+      run.problems.add("error: " + assertion + " (" + describe(e, className) + ")");
+      run.threw = true;
+    }
   }
 
-  private static String describe(Throwable e, String fileName) {
+  private static String describe(Throwable e, String className) {
     String description = e.getClass().getSimpleName();
     for (StackTraceElement frame : e.getStackTrace()) {
-      if (fileName.equals(frame.getFileName())) {
-        return description + " from " + fileName + ":" + frame.getLineNumber();
+      if (className.equals(frame.getClassName())) {
+        return description + " from " + frame.getFileName() + ":" + frame.getLineNumber();
       }
     }
     return description;
   }
 
-  public static void printResults() {
-    int numFailed = 0, numUnfinished = 0;
+  private static boolean anyTimedOut() {
+    for (CaseRun run : runs) {
+      long start = run.start;
+      if (start > 0 && !run.finished
+          && System.nanoTime() - start > TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS)) {
+        return true;
+      }
+    }
+    return false;
+  }
 
-    for (int i = 0; i < numAssertions; i++) {
+  public static boolean run() {
+    return run(StackWalker
+      .getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+      .getCallerClass());
+  }
+
+  public static boolean run(Class<?> cases) {
+    if (pool == null) {
+      init();
+    }
+
+    for (Method method : cases.getDeclaredMethods()) {
+      if (!method.isAnnotationPresent(Case.class)) {
+        continue;
+      }
+
+      CaseRun run = new CaseRun(method.getName());
+      runs.add(run);
+
+      service.submit(() -> {
+        run.start = System.nanoTime();
+        current.set(run);
+        try {
+          method.setAccessible(true);
+          Object instance = null;
+          if (!Modifier.isStatic(method.getModifiers())) {
+            Constructor<?> constructor = cases.getDeclaredConstructor();
+            constructor.setAccessible(true);
+            instance = constructor.newInstance();
+          }
+          method.invoke(instance);
+        } catch (InvocationTargetException e) {
+          run.problems.add("error: " + run.name + " (" + describe(e.getCause(), cases.getName()) + ")");
+          run.threw = true;
+        } catch (Exception | StackOverflowError e) {
+          run.problems.add("error: " + run.name + " (" + describe(e, cases.getName()) + ")");
+          run.threw = true;
+        } finally {
+          current.remove();
+          run.finished = true;
+        }
+        return run;
+      });
+    }
+
+    int numFailed = 0, numThrew = 0, numDone = 0;
+    List<String> unfinished = new ArrayList<>();
+
+    while (numDone < runs.size()) {
       try {
-        Future<Result> future = service.poll(5, TimeUnit.SECONDS);
+        Future<CaseRun> future = service.poll(100, TimeUnit.MILLISECONDS);
         if (future == null) {
-          numUnfinished = unfinished.size();
-          IO.print("U".repeat(numUnfinished) + "\nTests stopped after 5s");
+          if (!anyTimedOut()) {
+            continue;
+          }
+
+          for (CaseRun run : runs) {
+            if (!run.finished) {
+              IO.print("U");
+              unfinished.add(run.name);
+            }
+          }
+
+          IO.print("\nTests stopped after " + TIMEOUT_SECONDS + "s");
           break;
         }
-        Result r = future.get();
-        results.add(r);
-        unfinished.remove(r.assertion);
-        if (r.testPassed) {
-          IO.print(".");
-        } else {
+
+        CaseRun run = future.get();
+        numDone++;
+
+        if (run.threw) {
+          IO.print("T");
+          numThrew++;
+        } else if (!run.problems.isEmpty()) {
           IO.print("F");
           numFailed++;
+        } else {
+          IO.print(".");
         }
       } catch (InterruptedException | ExecutionException e) {
         break;
@@ -101,28 +170,27 @@ public class Test {
 
     pool.shutdownNow();
 
-    IO.print(String.format("\n%d failed", numFailed));
-    if (numUnfinished > 0) {
-      IO.print(String.format(", %d unfinished", numUnfinished));
-    }
-    IO.println();
+    IO.println(String.format(
+      "\n%d failed, %d threw, %d unfinished",
+      numFailed, numThrew, unfinished.size()
+    ));
 
-    for (Result r : results) {
-      if (r.error != null) {
-        IO.println("error: " + r.assertion + " (" + r.error + ")");
-      } else if (!r.testPassed) {
-        IO.println("failed: " + r.assertion);
+    for (CaseRun run : runs) {
+      if (run.finished && !run.problems.isEmpty()) {
+        IO.println(run.name);
+        for (String problem : run.problems) {
+          IO.println("  " + problem);
+        }
       }
     }
 
-    for (String assertion : unfinished) {
-      IO.println("unfinished: " + assertion);
+    for (String name : unfinished) {
+      IO.println("unfinished: " + name);
     }
 
-    if (numUnfinished > 0) {
-      System.exit(0);
-    }
+    boolean passed = numFailed == 0 && numThrew == 0 && unfinished.isEmpty();
 
     init();
+    return passed;
   }
 }

@@ -1,0 +1,16 @@
+name: Run tests of Test.java
+run-name: Run tests of Test.java
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+      - name: Run tests of Test
+        run: java TestTest.java
