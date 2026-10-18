@@ -83,6 +83,50 @@ static class Sleeping {
   }
 }
 
+static class ThrowsExpected {
+  @Test.Case
+  void exact() {
+    Test.assertThrows(NullPointerException.class, () -> {
+      throw new NullPointerException();
+    });
+  }
+
+  @Test.Case
+  void subclass() {
+    Test.assertThrows(RuntimeException.class, () -> {
+      throw new IllegalStateException();
+    });
+  }
+
+  @Test.Case
+  void checked() {
+    Test.assertThrows(Exception.class, () -> {
+      throw new Exception();
+    });
+  }
+
+  @Test.Case
+  void error() {
+    Test.assertThrows(StackOverflowError.class, () -> new Overflowing().recurse(0));
+  }
+}
+
+static class ThrowsNothing {
+  @Test.Case
+  void nothing() {
+    Test.assertThrows(RuntimeException.class, () -> {});
+  }
+}
+
+static class ThrowsWrongType {
+  @Test.Case
+  void wrong() {
+    Test.assertThrows(IllegalStateException.class, () -> {
+      throw new NullPointerException();
+    });
+  }
+}
+
 static class NoCases {
   void notACase() {}
 }
@@ -105,6 +149,9 @@ void main() {
   check("an exception in an assertion fails the run", !Test.run(Throwing.class));
   check("an exception from the case method fails the run", !Test.run(ThrowingCaseMethod.class));
   check("a stack overflow fails the run", !Test.run(Overflowing.class));
+  check("expected exceptions pass", Test.run(ThrowsExpected.class));
+  check("assertThrows fails when nothing is thrown", !Test.run(ThrowsNothing.class));
+  check("assertThrows fails on the wrong exception type", !Test.run(ThrowsWrongType.class));
   check("a class with no cases passes", Test.run(NoCases.class));
   check("state resets between runs", !Test.run(Failing.class) && Test.run(Passing.class));
 
@@ -120,6 +167,14 @@ void main() {
     rejected = true;
   }
   check("assertTrue outside a case is rejected", rejected);
+
+  rejected = false;
+  try {
+    Test.assertThrows(Exception.class, () -> {});
+  } catch (IllegalStateException e) {
+    rejected = true;
+  }
+  check("assertThrows outside a case is rejected", rejected);
 
   IO.println(failures == 0 ? "all checks passed" : failures + " checks failed");
   System.exit(failures == 0 ? 0 : 1);

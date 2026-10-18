@@ -1,21 +1,21 @@
 Like [`UnitTest.java`](https://github.com/abreen/UnitTest), but even smaller and safer.
 
 - Annotate test cases with `@Test.Case`
-- Call `Test.assertTrue()`
+- Call `Test.assertTrue()` or `Test.assertThrows()`
 - When you want to run, call `Test.run()`
 
 ### Usage
 
 ```
 % java Smudge.java
-FT..U
+F.T..U
 Tests stopped after 5s
 1 failed, 1 threw, 1 unfinished
-failing
-  failed: Smudge.java:44
-throwing
-  error: Smudge.java:49 (NullPointerException from Smudge.java:50)
-unfinished: slowTimedOut
+case failing()
+  failed assertion: Smudge.java:44
+case throwing()
+  error: Smudge.java:54 (NullPointerException from Smudge.java:55)
+unfinished case slowTimedOut()
 ```
 
 ### `Smudge.java`
@@ -65,6 +65,11 @@ void basic() {
 @Test.Case
 void failing() {
   Test.assertTrue(() -> "1234".equals(smudge("abcd")));
+}
+
+@Test.Case
+void throwsOnNull() {
+  Test.assertThrows(NullPointerException.class, () -> smudge(null));
 }
 
 @Test.Case

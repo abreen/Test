@@ -43,11 +43,21 @@ public class Test {
     runs = new ArrayList<>();
   }
 
-  public static void assertTrue(Callable<Boolean> function) {
+  @FunctionalInterface
+  public interface Thrower {
+    void run() throws Exception;
+  }
+
+  private static CaseRun requireRun(String method) {
     CaseRun run = current.get();
     if (run == null) {
-      throw new IllegalStateException("assertTrue must be called from a @Test.Case method");
+      throw new IllegalStateException(method + " must be called from a @Test.Case method");
     }
+    return run;
+  }
+
+  public static void assertTrue(Callable<Boolean> function) {
+    CaseRun run = requireRun("assertTrue");
 
     StackTraceElement[] frames = Thread.currentThread().getStackTrace();
     String className = frames[2].getClassName();
@@ -55,11 +65,29 @@ public class Test {
 
     try {
       if (!function.call()) {
-        run.problems.add("failed: " + assertion);
+        run.problems.add("failed assertion: " + assertion);
       }
     } catch (Exception | StackOverflowError e) {
       run.problems.add("error: " + assertion + " (" + describe(e, className) + ")");
       run.threw = true;
+    }
+  }
+
+  public static void assertThrows(Class<? extends Throwable> expected, Thrower function) {
+    CaseRun run = requireRun("assertThrows");
+
+    StackTraceElement[] frames = Thread.currentThread().getStackTrace();
+    String assertion = String.format("%s:%d", frames[2].getFileName(), frames[2].getLineNumber());
+
+    try {
+      function.run();
+      run.problems.add("failed assertion: " + assertion + " (expected " + expected.getSimpleName()
+        + ", nothing thrown)");
+    } catch (Throwable t) {
+      if (!expected.isInstance(t)) {
+        run.problems.add("failed assertion: " + assertion + " (expected " + expected.getSimpleName()
+          + ", got " + t.getClass().getSimpleName() + ")");
+      }
     }
   }
 
@@ -176,8 +204,8 @@ public class Test {
     ));
 
     for (CaseRun run : runs) {
-      if (run.finished && !run.problems.isEmpty()) {
-        IO.println(run.name);
+      if (run.finished && !run.problems.isEmpty() && !unfinished.contains(run.name)) {
+        IO.println("case " + run.name + "()");
         for (String problem : run.problems) {
           IO.println("  " + problem);
         }
@@ -185,7 +213,7 @@ public class Test {
     }
 
     for (String name : unfinished) {
-      IO.println("unfinished: " + name);
+      IO.println("unfinished case " + name + "()");
     }
 
     boolean passed = numFailed == 0 && numThrew == 0 && unfinished.isEmpty();
